@@ -1,24 +1,17 @@
 /* =========================================================================
- * Atlantic Fieldhouse — Camp Registration Report Generator (v3)
+ * Atlantic Fieldhouse — Camp Registration Report Generator (v4)
  *
  * Reads a Sigma "Event Schedule With Participants" export (.csv or .xlsx)
- * and renders:
- *   1. Weekly Attendance pivot (Week × Day × Product) — counts kids on site
- *   2. Unique Participants by Camp
- *   3. Participants by Camp × Day of Week
- *   4. Revenue per Week (bar chart)
- *   5. Day-of-Week Popularity (bar chart)
  *
  * COUNTING LOGIC:
- *   "Register by week"          -> 5 rows per week per kid. Collapsed to
- *                                  one "registration" per kid per week, but
- *                                  counts as attendance on all 5 days.
+ *   "Register by week"          -> Each row IS one day of attendance (Sigma
+ *                                  already exploded to 5 rows). For the
+ *                                  Registrations KPI, collapse to one per
+ *                                  (participant, week).
  *   "Register for specific days" -> each row = 1 registration = 1 day of
- *                                  attendance.
+ *                                   attendance.
  *
- * All processing is client-side. Files never leave the browser.
- *
- * PRICING (edit here to match current rates):
+ * PRICING (edit to match current rates):
  * ========================================================================= */
 
 const AFH_PRICES = {
@@ -34,7 +27,28 @@ const AFH_PRICES = {
   const REQUIRED_COLUMNS = ['Event Start Date', 'Participant Name', 'Product Name'];
   const WEEKLY_SESSION_NAME = 'Register by week';
 
+  // Camp palette — matches CSS
+  const CAMP_COLORS = {
+    navy:   '#11304d',
+    forest: '#2d6a4f',
+    leaf:   '#52b788',
+    sun:    '#f9a620',
+    clay:   '#e76f51',
+    sky:    '#6ba4b8'
+  };
+  // Day colors for grouped bar chart (mimics the Excel reference)
+  const DAY_COLORS = {
+    Mon: CAMP_COLORS.navy,
+    Tue: CAMP_COLORS.clay,
+    Wed: CAMP_COLORS.leaf,
+    Thu: CAMP_COLORS.sun,
+    Fri: CAMP_COLORS.sky,
+    Sat: '#9b5de5',
+    Sun: '#6c757d'
+  };
+
   const $ = (id) => document.getElementById(id);
+  let chartInstance = null;  // keep Chart.js reference so we can destroy on re-run
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
@@ -44,10 +58,7 @@ const AFH_PRICES = {
 
   function init() {
     const fileInput = $('afh-file');
-    if (!fileInput) {
-      console.warn('[AFH] Markup not found.');
-      return;
-    }
+    if (!fileInput) return;
 
     const fileDisplay = $('afh-file-display');
     const generateBtn = $('afh-generate');
@@ -89,7 +100,7 @@ const AFH_PRICES = {
     function parseCSV(file) {
       Papa.parse(file, {
         header: true, skipEmptyLines: true,
-        complete: (results) => processRows(results.data),
+        complete: (r) => processRows(r.data),
         error: (err) => {
           showError('Could not parse CSV: ' + err.message);
           loadingEl.classList.remove('active');
@@ -106,8 +117,7 @@ const AFH_PRICES = {
             n.toLowerCase().includes('participant') && n.toLowerCase().includes('attendance')
           );
           const sheetName = preferred || wb.SheetNames[wb.SheetNames.length - 1];
-          const sheet = wb.Sheets[sheetName];
-          const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: false });
           processRows(rows);
         } catch (err) {
           showError('Could not read Excel file: ' + err.message);
@@ -124,7 +134,6 @@ const AFH_PRICES = {
     function processRows(rows) {
       try {
         if (!rows || rows.length === 0) throw new Error('The file is empty.');
-
         const cols = Object.keys(rows[0] || {});
         const missing = REQUIRED_COLUMNS.filter(c => !cols.includes(c));
         if (missing.length) {
@@ -132,13 +141,11 @@ const AFH_PRICES = {
             '. Did the Sigma export format change?');
         }
 
-        // Keep only usable rows
         const clean = rows.filter(r =>
           r['Participant Name'] && r['Product Name'] && r['Event Start Date']
         );
         if (clean.length === 0) throw new Error('No valid registration rows found.');
 
-        // Normalize: derive Day-of-Week and Week label from Event Start Date
         clean.forEach(r => {
           const d = parseDate(r['Event Start Date']);
           r._date = d;
@@ -165,7 +172,6 @@ const AFH_PRICES = {
       const daysSeen = new Set(rows.map(r => r._dow));
       const days = DAY_ORDER.filter(d => daysSeen.has(d));
 
-      // Order weeks by earliest date
       const weekDates = {};
       rows.forEach(r => {
         const wk = r._week;
@@ -174,11 +180,7 @@ const AFH_PRICES = {
       });
       const weeks = Object.keys(weekDates).sort((a, b) => weekDates[a] - weekDates[b]);
 
-      // === ATTENDANCE MATRIX ===
-      // For weekly-pass rows, each row IS one day of attendance (Sigma already
-      // exploded it into 5 rows). So counting rows = counting attendance days.
-      // For single-day rows, each row = one day of attendance.
-      // => Just count rows per (week, day, product) for the attendance view.
+      // Attendance matrix (rows = attendance days)
       const att = {};
       weeks.forEach(w => {
         att[w] = {};
@@ -192,61 +194,45 @@ const AFH_PRICES = {
         if (att[w] && att[w][d] && att[w][d][p] !== undefined) att[w][d][p]++;
       });
 
-      // === REGISTRATIONS (billable) ===
-      // Weekly-pass: collapse 5 rows -> 1 registration per (participant, week)
-      // Single-day: each row = 1 registration
-      const regs = [];  // flat list of {participant, product, week, days, amount}
-      const weeklyKey = (name, week) => name + '||' + week;
+      // Registrations (billable)
+      const regs = [];
       const seenWeekly = new Set();
-
       rows.forEach(r => {
-        const session = r['Session Name'] || '';
-        const isWeekly = session === WEEKLY_SESSION_NAME;
+        const isWeekly = (r['Session Name'] || '') === WEEKLY_SESSION_NAME;
         const name = r['Participant Name'];
         const product = r['Product Name'];
         const week = r._week;
-
         if (isWeekly) {
-          const k = weeklyKey(name, week);
+          const k = name + '||' + week;
           if (seenWeekly.has(k)) return;
           seenWeekly.add(k);
-          regs.push({
-            participant: name,
-            product: product,
-            week: week,
-            days: 5,
-            amount: AFH_PRICES[product] || 0,
-            type: 'weekly'
-          });
+          regs.push({ participant: name, product, week, days: 5,
+            amount: AFH_PRICES[product] || 0, type: 'weekly' });
         } else {
-          regs.push({
-            participant: name,
-            product: product,
-            week: week,
-            days: 1,
-            amount: AFH_PRICES[product] || 0,
-            type: 'daily'
-          });
+          regs.push({ participant: name, product, week, days: 1,
+            amount: AFH_PRICES[product] || 0, type: 'daily' });
         }
       });
 
-      // === REVENUE BY WEEK ===
+      // Revenue by week
       const revenueByWeek = {};
       weeks.forEach(w => { revenueByWeek[w] = 0; });
       regs.forEach(r => {
         if (revenueByWeek[r.week] !== undefined) revenueByWeek[r.week] += r.amount;
       });
 
-      // === DAY-OF-WEEK POPULARITY ===
-      // Counts attendance days, not registrations
-      const byDay = {};
-      days.forEach(d => { byDay[d] = 0; });
+      // Product × Day matrix (for the grouped bar chart — this is the Excel chart)
+      const productDay = {};
+      products.forEach(p => {
+        productDay[p] = {};
+        days.forEach(d => { productDay[p][d] = 0; });
+      });
       rows.forEach(r => {
-        if (byDay[r._dow] !== undefined) byDay[r._dow]++;
+        const p = r['Product Name'], d = r._dow;
+        if (productDay[p] && productDay[p][d] !== undefined) productDay[p][d]++;
       });
 
-      // === UNIQUE PARTICIPANTS BY PRODUCT ===
-      // (attendance days per kid per product)
+      // Unique participants by product
       const byProduct = {};
       products.forEach(p => { byProduct[p] = {}; });
       rows.forEach(r => {
@@ -255,18 +241,6 @@ const AFH_PRICES = {
         byProduct[p][name]++;
       });
 
-      // === PARTICIPANTS BY CAMP × DAY ===
-      const campDay = {};
-      products.forEach(p => {
-        campDay[p] = {};
-        days.forEach(d => { campDay[p][d] = 0; });
-      });
-      rows.forEach(r => {
-        const p = r['Product Name'], d = r._dow;
-        if (campDay[p] && campDay[p][d] !== undefined) campDay[p][d]++;
-      });
-
-      // === KPIs ===
       const uniqueParticipants = uniq(rows.map(r => r['Participant Name'])).length;
       const uniqueFamilies = uniq(rows.map(r => r['Customer Name']).filter(Boolean)).length;
       const totalAttendanceDays = rows.length;
@@ -278,16 +252,11 @@ const AFH_PRICES = {
         attendance: att,
         registrations: regs,
         revenueByWeek,
-        byDay,
+        productDay,
         byProduct,
-        campDay,
         kpis: {
-          totalAttendanceDays,
-          totalRegistrations,
-          uniqueParticipants,
-          uniqueFamilies,
-          totalRevenue,
-          weeksOfCamp: weeks.length
+          totalAttendanceDays, totalRegistrations, uniqueParticipants,
+          uniqueFamilies, totalRevenue, weeksOfCamp: weeks.length
         },
         generatedAt: new Date()
       };
@@ -298,9 +267,8 @@ const AFH_PRICES = {
       renderKPIs(report);
       renderMainPivot(report);
       renderUniqueTable(report);
-      renderCampDayTable(report);
+      renderProductDayChart(report);
       renderRevenueChart(report);
-      renderDayChart(report);
       $('afh-foot-meta').textContent =
         report.kpis.totalAttendanceDays + ' attendance days · ' +
         report.kpis.totalRegistrations + ' registrations · ' +
@@ -318,30 +286,14 @@ const AFH_PRICES = {
     function renderKPIs(report) {
       const k = report.kpis;
       const kpis = [
-        {
-          label: 'Attendance Days',
-          value: k.totalAttendanceDays.toLocaleString(),
-          sub: 'Total kid-days on site',
-          icon: iconCheck()
-        },
-        {
-          label: 'Registrations',
-          value: k.totalRegistrations.toLocaleString(),
-          sub: 'Billable bookings',
-          icon: iconClipboard()
-        },
-        {
-          label: 'Unique Kids',
-          value: k.uniqueParticipants.toLocaleString(),
-          sub: k.uniqueFamilies + ' families',
-          icon: iconUsers()
-        },
-        {
-          label: 'Est. Revenue',
-          value: '$' + k.totalRevenue.toLocaleString(),
-          sub: 'At current pricing',
-          icon: iconDollar()
-        }
+        { label: 'Attendance Days', value: k.totalAttendanceDays.toLocaleString(),
+          sub: 'Total kid-days on site', icon: iconTent() },
+        { label: 'Registrations', value: k.totalRegistrations.toLocaleString(),
+          sub: 'Billable bookings', icon: iconTicket() },
+        { label: 'Unique Kids', value: k.uniqueParticipants.toLocaleString(),
+          sub: k.uniqueFamilies + ' families', icon: iconKids() },
+        { label: 'Est. Revenue', value: '$' + k.totalRevenue.toLocaleString(),
+          sub: 'At current pricing', icon: iconCoin() }
       ];
       $('afh-kpis').innerHTML = kpis.map(k =>
         '<div class="afh-kpi">' +
@@ -389,16 +341,15 @@ const AFH_PRICES = {
 
       let theadTop = '<tr><th rowspan="2" class="afh-th-day">Week</th>';
       days.forEach(d => {
-        const dayProducts = products.filter(p => grandDayProduct[d][p] > 0);
-        theadTop += '<th colspan="' + dayProducts.length + '" class="afh-th-day">' + esc(d) + '</th>';
+        const dp = products.filter(p => grandDayProduct[d][p] > 0);
+        theadTop += '<th colspan="' + dp.length + '" class="afh-th-day">' + esc(d) + '</th>';
         theadTop += '<th rowspan="2" class="afh-th-total">' + esc(d) + ' Total</th>';
       });
       theadTop += '<th rowspan="2" class="afh-th-total">Grand Total</th></tr>';
 
       let theadBot = '<tr>';
       days.forEach(d => {
-        const dayProducts = products.filter(p => grandDayProduct[d][p] > 0);
-        dayProducts.forEach(p => {
+        products.filter(p => grandDayProduct[d][p] > 0).forEach(p => {
           theadBot += '<th class="afh-th-product">' + esc(shortProduct(p)) + '</th>';
         });
       });
@@ -408,21 +359,17 @@ const AFH_PRICES = {
       weeks.forEach(w => {
         tbody += '<tr><td class="afh-td-row-label">' + esc(w) + '</td>';
         days.forEach(d => {
-          const dayProducts = products.filter(p => grandDayProduct[d][p] > 0);
-          dayProducts.forEach(p => {
-            const v = main[w][d][p];
-            tbody += cell(v, maxCell);
+          products.filter(p => grandDayProduct[d][p] > 0).forEach(p => {
+            tbody += cell(main[w][d][p], maxCell);
           });
-          const dt = weekDayTotals[w][d];
-          tbody += '<td class="afh-td-day-total">' + (dt || '—') + '</td>';
+          tbody += '<td class="afh-td-day-total">' + (weekDayTotals[w][d] || '—') + '</td>';
         });
         tbody += '<td class="afh-td-grand">' + weekTotal[w] + '</td></tr>';
       });
 
       tbody += '<tr class="afh-tr-total"><td class="afh-td-row-label">Grand Total</td>';
       days.forEach(d => {
-        const dayProducts = products.filter(p => grandDayProduct[d][p] > 0);
-        dayProducts.forEach(p => {
+        products.filter(p => grandDayProduct[d][p] > 0).forEach(p => {
           tbody += '<td>' + grandDayProduct[d][p] + '</td>';
         });
         tbody += '<td class="afh-td-day-total">' + grandDayTotal[d] + '</td>';
@@ -435,14 +382,13 @@ const AFH_PRICES = {
 
     function cell(v, max) {
       if (!v) return '<td class="afh-td-empty">—</td>';
-      const ratio = max ? v / max : 0;
-      let cls = 'heat-0';
-      if (ratio > 0)    cls = 'heat-1';
-      if (ratio > 0.2)  cls = 'heat-2';
-      if (ratio > 0.35) cls = 'heat-3';
-      if (ratio > 0.55) cls = 'heat-4';
-      if (ratio > 0.75) cls = 'heat-5';
-      if (ratio > 0.9)  cls = 'heat-6';
+      const r = max ? v / max : 0;
+      let cls = 'heat-1';
+      if (r > 0.2)  cls = 'heat-2';
+      if (r > 0.35) cls = 'heat-3';
+      if (r > 0.55) cls = 'heat-4';
+      if (r > 0.75) cls = 'heat-5';
+      if (r > 0.9)  cls = 'heat-6';
       return '<td class="' + cls + '">' + v + '</td>';
     }
 
@@ -452,9 +398,9 @@ const AFH_PRICES = {
       let grand = 0;
       products.forEach(p => {
         const entries = Object.entries(byProduct[p]).sort((a, b) => a[0].localeCompare(b[0]));
-        const productTotal = entries.reduce((s, kv) => s + kv[1], 0);
-        grand += productTotal;
-        html += '<tr class="afh-group-header"><td>' + esc(p) + '</td><td>' + productTotal + '</td></tr>';
+        const total = entries.reduce((s, kv) => s + kv[1], 0);
+        grand += total;
+        html += '<tr class="afh-group-header"><td>' + esc(p) + '</td><td>' + total + '</td></tr>';
         entries.forEach(kv => {
           html += '<tr class="afh-child-row"><td>' + esc(kv[0]) + '</td><td>' + kv[1] + '</td></tr>';
         });
@@ -463,33 +409,91 @@ const AFH_PRICES = {
       $('afh-unique-table').innerHTML = html;
     }
 
-    function renderCampDayTable(report) {
-      const { products, days, campDay } = report;
-      let thead = '<thead><tr><th class="afh-th-day">Camp</th>';
-      days.forEach(d => thead += '<th class="afh-th-day">' + esc(d) + '</th>');
-      thead += '<th class="afh-th-total">Grand Total</th></tr></thead>';
+    /* =====================================================================
+     * Grouped bar chart — replicates the Excel chart you shared.
+     * X-axis: each product. Within each product, one bar per day of week.
+     * ===================================================================== */
+    function renderProductDayChart(report) {
+      const { products, days, productDay } = report;
+      const canvas = $('afh-product-day-chart');
+      if (!canvas) return;
 
-      let tbody = '<tbody>';
-      const dayGrand = {}; days.forEach(d => dayGrand[d] = 0);
-      let allGrand = 0;
-      products.forEach(p => {
-        tbody += '<tr><td class="afh-td-row-label">' + esc(shortProduct(p)) + '</td>';
-        let rowTot = 0;
-        days.forEach(d => {
-          const v = campDay[p][d];
-          rowTot += v; dayGrand[d] += v;
-          tbody += v > 0 ? '<td>' + v + '</td>' : '<td class="afh-td-empty">—</td>';
-        });
-        allGrand += rowTot;
-        tbody += '<td class="afh-td-grand">' + rowTot + '</td></tr>';
+      // Destroy previous instance if re-running
+      if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+
+      const datasets = days.map(d => ({
+        label: d,
+        data: products.map(p => productDay[p][d] || 0),
+        backgroundColor: DAY_COLORS[d] || CAMP_COLORS.forest,
+        borderRadius: 6,
+        borderSkipped: false,
+        maxBarThickness: 44,
+        categoryPercentage: 0.8,
+        barPercentage: 0.92
+      }));
+
+      chartInstance = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: products.map(p => p),   // full product names, matches Excel
+          datasets: datasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 600, easing: 'easeOutCubic' },
+          plugins: {
+            legend: {
+              position: 'right',
+              align: 'center',
+              labels: {
+                boxWidth: 14, boxHeight: 14, borderRadius: 4,
+                useBorderRadius: true,
+                padding: 14,
+                font: { size: 13, weight: '600', family: 'inherit' },
+                color: CAMP_COLORS.navy
+              }
+            },
+            tooltip: {
+              backgroundColor: CAMP_COLORS.navy,
+              titleFont: { weight: '700', size: 13 },
+              bodyFont: { size: 12.5 },
+              padding: 10,
+              cornerRadius: 8,
+              displayColors: true,
+              callbacks: {
+                title: (items) => items[0].label,
+                label: (ctx) => ctx.dataset.label + ': ' + ctx.parsed.y + ' kids'
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: {
+                font: { size: 12.5, weight: '600', family: 'inherit' },
+                color: CAMP_COLORS.navy,
+                autoSkip: false,
+                maxRotation: 0,
+                minRotation: 0
+              }
+            },
+            y: {
+              beginAtZero: true,
+              grid: { color: '#f0e8d6', drawBorder: false },
+              ticks: {
+                font: { size: 11.5, family: 'inherit' },
+                color: '#64748b',
+                stepSize: 5,
+                padding: 6
+              }
+            }
+          }
+        }
       });
-      tbody += '<tr class="afh-tr-total"><td class="afh-td-row-label">Grand Total</td>';
-      days.forEach(d => tbody += '<td class="afh-td-day-total">' + dayGrand[d] + '</td>');
-      tbody += '<td class="afh-td-grand">' + allGrand + '</td></tr></tbody>';
-
-      $('afh-camp-day-table').innerHTML = thead + tbody;
     }
 
+    /* Revenue chart — clean custom bars, not Chart.js */
     function renderRevenueChart(report) {
       const { weeks, revenueByWeek } = report;
       const max = Math.max(1, ...weeks.map(w => revenueByWeek[w]));
@@ -506,27 +510,6 @@ const AFH_PRICES = {
       });
       html += '</div>';
       $('afh-revenue-chart').innerHTML = html;
-    }
-
-    function renderDayChart(report) {
-      const { days, byDay } = report;
-      const max = Math.max(1, ...days.map(d => byDay[d]));
-      let html = '<div class="afh-day-chart">';
-      days.forEach(d => {
-        const v = byDay[d];
-        const pct = (v / max) * 100;
-        html +=
-          '<div class="afh-day-col">' +
-            '<div class="afh-day-bar-wrap">' +
-              '<div class="afh-day-bar" style="height:' + pct + '%">' +
-                '<div class="afh-day-bar-value">' + v + '</div>' +
-              '</div>' +
-            '</div>' +
-            '<div class="afh-day-name">' + esc(d) + '</div>' +
-          '</div>';
-      });
-      html += '</div>';
-      $('afh-day-chart').innerHTML = html;
     }
 
     // === Downloads ===
@@ -564,8 +547,7 @@ const AFH_PRICES = {
               const ctx = sc.getContext('2d');
               ctx.drawImage(canvas, 0, i * sliceH, canvas.width, sc.height, 0, 0, canvas.width, sc.height);
               if (i > 0) pdf.addPage();
-              const sih = (sc.height / sc.width) * imgW;
-              pdf.addImage(sc.toDataURL('image/png'), 'PNG', 20, 20, imgW, sih);
+              pdf.addImage(sc.toDataURL('image/png'), 'PNG', 20, 20, imgW, (sc.height / sc.width) * imgW);
             }
           }
           pdf.save(fileName('pdf'));
@@ -575,9 +557,8 @@ const AFH_PRICES = {
 
     function downloadXLSX() {
       if (!currentReport) return;
-      const { products, days, weeks, attendance, byProduct, campDay, revenueByWeek, byDay } = currentReport;
+      const { products, days, weeks, attendance, byProduct, productDay, revenueByWeek } = currentReport;
 
-      // Sheet 1: Weekly Attendance
       const mainHeader = ['Week'];
       days.forEach(d => products.forEach(p => {
         const total = weeks.reduce((s, w) => s + (attendance[w][d][p] || 0), 0);
@@ -589,21 +570,20 @@ const AFH_PRICES = {
       const mainRows = [mainHeader];
       weeks.forEach(w => {
         const row = [w];
-        let weekTot = 0;
-        const dayTotals = {};
+        let wTot = 0;
+        const dt = {};
         days.forEach(d => {
-          dayTotals[d] = 0;
+          dt[d] = 0;
           products.forEach(p => {
             const total = weeks.reduce((s, ww) => s + (attendance[ww][d][p] || 0), 0);
             if (total > 0) {
               const v = attendance[w][d][p] || 0;
-              row.push(v);
-              dayTotals[d] += v;
+              row.push(v); dt[d] += v;
             }
           });
         });
-        days.forEach(d => { row.push(dayTotals[d]); weekTot += dayTotals[d]; });
-        row.push(weekTot);
+        days.forEach(d => { row.push(dt[d]); wTot += dt[d]; });
+        row.push(wTot);
         mainRows.push(row);
       });
 
@@ -615,28 +595,20 @@ const AFH_PRICES = {
         entries.forEach(kv => uniqueRows.push(['', kv[0], kv[1]]));
       });
 
-      const cdHeader = ['Camp'].concat(days).concat(['Grand Total']);
-      const cdRows = [cdHeader];
+      const pdHeader = ['Product'].concat(days);
+      const pdRows = [pdHeader];
       products.forEach(p => {
-        const row = [shortProduct(p)];
-        let tot = 0;
-        days.forEach(d => { row.push(campDay[p][d]); tot += campDay[p][d]; });
-        row.push(tot);
-        cdRows.push(row);
+        pdRows.push([p].concat(days.map(d => productDay[p][d])));
       });
 
       const revRows = [['Week', 'Revenue']];
       weeks.forEach(w => revRows.push([w, revenueByWeek[w]]));
 
-      const dayRows = [['Day', 'Attendance Days']];
-      days.forEach(d => dayRows.push([d, byDay[d]]));
-
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mainRows), 'Weekly Attendance');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(uniqueRows), 'Unique Participants');
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cdRows), 'Camp by Day');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pdRows), 'Product by Day');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(revRows), 'Revenue by Week');
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dayRows), 'Day Popularity');
       XLSX.writeFile(wb, fileName('xlsx'));
     }
 
@@ -697,18 +669,21 @@ const AFH_PRICES = {
     }
     function hideStatus() { statusEl.className = 'afh-status'; statusEl.textContent = ''; }
 
-    // === Icons (inline SVG) ===
-    function iconCheck() {
-      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>';
+    // === Camp-themed inline SVG icons (sized via CSS) ===
+    function iconTent() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l9-16 9 16H3z"/><path d="M12 4v16"/><path d="M8 20l4-6 4 6"/></svg>';
     }
-    function iconClipboard() {
-      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><path d="M9 14l2 2 4-4"></path></svg>';
+    function iconTicket() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a2 2 0 1 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a2 2 0 1 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v2z"/><path d="M13 5v2"/><path d="M13 17v2"/><path d="M13 11v2"/></svg>';
     }
-    function iconUsers() {
-      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>';
+    function iconKids() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M17 13.5a3 3 0 0 1 3 3V19"/></svg>';
     }
-    function iconDollar() {
-      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>';
+    function iconCoin() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15 9.5a2.5 2.5 0 0 0-2.5-2.5h-1A2.5 2.5 0 0 0 9 9.5v0a2.5 2.5 0 0 0 2.5 2.5h1A2.5 2.5 0 0 1 15 14.5v0a2.5 2.5 0 0 1-2.5 2.5h-1A2.5 2.5 0 0 1 9 14.5"/><path d="M12 6V5"/><path d="M12 19v-1"/></svg>';
     }
   }
+
+  // Logo SVG (small pine tree) for the app header
+  // Called from inline HTML so no need to export.
 })();
