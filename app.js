@@ -1,31 +1,41 @@
 /* =========================================================================
- * Atlantic Fieldhouse — Camp Registration Report Generator
+ * Atlantic Fieldhouse — Camp Registration Report Generator (v3)
  *
  * Reads a Sigma "Event Schedule With Participants" export (.csv or .xlsx)
- * and renders three pivot views matching the existing report structure:
- *
- *   1. Overall Counts by Week × (Day of Week × Product)
+ * and renders:
+ *   1. Weekly Attendance pivot (Week × Day × Product) — counts kids on site
  *   2. Unique Participants by Camp
  *   3. Participants by Camp × Day of Week
+ *   4. Revenue per Week (bar chart)
+ *   5. Day-of-Week Popularity (bar chart)
+ *
+ * COUNTING LOGIC:
+ *   "Register by week"          -> 5 rows per week per kid. Collapsed to
+ *                                  one "registration" per kid per week, but
+ *                                  counts as attendance on all 5 days.
+ *   "Register for specific days" -> each row = 1 registration = 1 day of
+ *                                  attendance.
  *
  * All processing is client-side. Files never leave the browser.
+ *
+ * PRICING (edit here to match current rates):
  * ========================================================================= */
+
+const AFH_PRICES = {
+  '1 Week of Camp (Full Day)':       400,   // per week
+  'Summer Camp Full Day (9am-3pm)':  95,    // per day
+  'Summer Camp Half Day (9am-12pm)': 55     // per day
+};
 
 (function() {
   'use strict';
 
-  // === Configuration ===
   const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  // Only these are strictly required. Start Day of Week and Week of
-  // are derived from Event Start Date if they aren't present in the file.
-  const REQUIRED_COLUMNS = [
-    'Event Start Date', 'Participant Name', 'Product Name'
-  ];
+  const REQUIRED_COLUMNS = ['Event Start Date', 'Participant Name', 'Product Name'];
+  const WEEKLY_SESSION_NAME = 'Register by week';
 
-  // === DOM references ===
   const $ = (id) => document.getElementById(id);
 
-  // Wait until the markup is in the page (needed when loaded via Webflow embed)
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
@@ -35,7 +45,7 @@
   function init() {
     const fileInput = $('afh-file');
     if (!fileInput) {
-      console.warn('[AFH] Markup not found — make sure the embed HTML is on the page.');
+      console.warn('[AFH] Markup not found.');
       return;
     }
 
@@ -46,7 +56,6 @@
     const reportEl = $('afh-report');
     let currentReport = null;
 
-    // File selection
     fileInput.addEventListener('change', () => {
       const file = fileInput.files[0];
       if (file) {
@@ -61,7 +70,6 @@
       }
     });
 
-    // Generate button
     generateBtn.addEventListener('click', () => {
       const file = fileInput.files[0];
       if (!file) return;
@@ -70,11 +78,9 @@
       reportEl.classList.remove('active');
 
       const ext = file.name.split('.').pop().toLowerCase();
-      if (ext === 'csv') {
-        parseCSV(file);
-      } else if (ext === 'xlsx' || ext === 'xls') {
-        parseXLSX(file);
-      } else {
+      if (ext === 'csv') parseCSV(file);
+      else if (ext === 'xlsx' || ext === 'xls') parseXLSX(file);
+      else {
         showError('Unsupported file type. Please upload a .csv or .xlsx file.');
         loadingEl.classList.remove('active');
       }
@@ -82,8 +88,7 @@
 
     function parseCSV(file) {
       Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
+        header: true, skipEmptyLines: true,
         complete: (results) => processRows(results.data),
         error: (err) => {
           showError('Could not parse CSV: ' + err.message);
@@ -123,28 +128,22 @@
         const cols = Object.keys(rows[0] || {});
         const missing = REQUIRED_COLUMNS.filter(c => !cols.includes(c));
         if (missing.length) {
-          throw new Error(
-            'Missing required columns: ' + missing.join(', ') +
-            '. Did the Sigma export format change?'
-          );
+          throw new Error('Missing required columns: ' + missing.join(', ') +
+            '. Did the Sigma export format change?');
         }
 
+        // Keep only usable rows
         const clean = rows.filter(r =>
           r['Participant Name'] && r['Product Name'] && r['Event Start Date']
         );
         if (clean.length === 0) throw new Error('No valid registration rows found.');
 
-        // Derive "Start Day of Week" and "Week of" from Event Start Date
-        // if those columns are missing from the Sigma export. This keeps
-        // the tool working across export format changes.
+        // Normalize: derive Day-of-Week and Week label from Event Start Date
         clean.forEach(r => {
           const d = parseDate(r['Event Start Date']);
-          if (!r['Start Day of Week'] && d) {
-            r['Start Day of Week'] = deriveDayOfWeek(d);
-          }
-          if (!r['Week of'] && d) {
-            r['Week of'] = deriveWeekLabel(d);
-          }
+          r._date = d;
+          r._dow = d ? deriveDayOfWeek(d) : '';
+          r._week = d ? deriveWeekLabel(d) : '';
         });
 
         const report = buildReport(clean);
@@ -163,31 +162,91 @@
 
     function buildReport(rows) {
       const products = uniq(rows.map(r => r['Product Name'])).sort();
-      const daysSeen = new Set(rows.map(r => r['Start Day of Week']));
+      const daysSeen = new Set(rows.map(r => r._dow));
       const days = DAY_ORDER.filter(d => daysSeen.has(d));
 
+      // Order weeks by earliest date
       const weekDates = {};
       rows.forEach(r => {
-        const wk = r['Week of'];
-        const d = parseDate(r['Event Start Date']);
-        if (!d) return;
-        if (!weekDates[wk] || d < weekDates[wk]) weekDates[wk] = d;
+        const wk = r._week;
+        if (!wk || !r._date) return;
+        if (!weekDates[wk] || r._date < weekDates[wk]) weekDates[wk] = r._date;
       });
       const weeks = Object.keys(weekDates).sort((a, b) => weekDates[a] - weekDates[b]);
 
-      const main = {};
+      // === ATTENDANCE MATRIX ===
+      // For weekly-pass rows, each row IS one day of attendance (Sigma already
+      // exploded it into 5 rows). So counting rows = counting attendance days.
+      // For single-day rows, each row = one day of attendance.
+      // => Just count rows per (week, day, product) for the attendance view.
+      const att = {};
       weeks.forEach(w => {
-        main[w] = {};
+        att[w] = {};
         days.forEach(d => {
-          main[w][d] = {};
-          products.forEach(p => { main[w][d][p] = 0; });
+          att[w][d] = {};
+          products.forEach(p => { att[w][d][p] = 0; });
         });
       });
       rows.forEach(r => {
-        const w = r['Week of'], d = r['Start Day of Week'], p = r['Product Name'];
-        if (main[w] && main[w][d] && main[w][d][p] !== undefined) main[w][d][p]++;
+        const w = r._week, d = r._dow, p = r['Product Name'];
+        if (att[w] && att[w][d] && att[w][d][p] !== undefined) att[w][d][p]++;
       });
 
+      // === REGISTRATIONS (billable) ===
+      // Weekly-pass: collapse 5 rows -> 1 registration per (participant, week)
+      // Single-day: each row = 1 registration
+      const regs = [];  // flat list of {participant, product, week, days, amount}
+      const weeklyKey = (name, week) => name + '||' + week;
+      const seenWeekly = new Set();
+
+      rows.forEach(r => {
+        const session = r['Session Name'] || '';
+        const isWeekly = session === WEEKLY_SESSION_NAME;
+        const name = r['Participant Name'];
+        const product = r['Product Name'];
+        const week = r._week;
+
+        if (isWeekly) {
+          const k = weeklyKey(name, week);
+          if (seenWeekly.has(k)) return;
+          seenWeekly.add(k);
+          regs.push({
+            participant: name,
+            product: product,
+            week: week,
+            days: 5,
+            amount: AFH_PRICES[product] || 0,
+            type: 'weekly'
+          });
+        } else {
+          regs.push({
+            participant: name,
+            product: product,
+            week: week,
+            days: 1,
+            amount: AFH_PRICES[product] || 0,
+            type: 'daily'
+          });
+        }
+      });
+
+      // === REVENUE BY WEEK ===
+      const revenueByWeek = {};
+      weeks.forEach(w => { revenueByWeek[w] = 0; });
+      regs.forEach(r => {
+        if (revenueByWeek[r.week] !== undefined) revenueByWeek[r.week] += r.amount;
+      });
+
+      // === DAY-OF-WEEK POPULARITY ===
+      // Counts attendance days, not registrations
+      const byDay = {};
+      days.forEach(d => { byDay[d] = 0; });
+      rows.forEach(r => {
+        if (byDay[r._dow] !== undefined) byDay[r._dow]++;
+      });
+
+      // === UNIQUE PARTICIPANTS BY PRODUCT ===
+      // (attendance days per kid per product)
       const byProduct = {};
       products.forEach(p => { byProduct[p] = {}; });
       rows.forEach(r => {
@@ -196,27 +255,38 @@
         byProduct[p][name]++;
       });
 
+      // === PARTICIPANTS BY CAMP × DAY ===
       const campDay = {};
       products.forEach(p => {
         campDay[p] = {};
         days.forEach(d => { campDay[p][d] = 0; });
       });
       rows.forEach(r => {
-        const p = r['Product Name'], d = r['Start Day of Week'];
+        const p = r['Product Name'], d = r._dow;
         if (campDay[p] && campDay[p][d] !== undefined) campDay[p][d]++;
       });
 
+      // === KPIs ===
       const uniqueParticipants = uniq(rows.map(r => r['Participant Name'])).length;
       const uniqueFamilies = uniq(rows.map(r => r['Customer Name']).filter(Boolean)).length;
-      const totalRegistrations = rows.length;
+      const totalAttendanceDays = rows.length;
+      const totalRegistrations = regs.length;
+      const totalRevenue = regs.reduce((s, r) => s + r.amount, 0);
 
       return {
         products, days, weeks,
-        main, byProduct, campDay,
+        attendance: att,
+        registrations: regs,
+        revenueByWeek,
+        byDay,
+        byProduct,
+        campDay,
         kpis: {
+          totalAttendanceDays,
           totalRegistrations,
           uniqueParticipants,
           uniqueFamilies,
+          totalRevenue,
           weeksOfCamp: weeks.length
         },
         generatedAt: new Date()
@@ -229,10 +299,12 @@
       renderMainPivot(report);
       renderUniqueTable(report);
       renderCampDayTable(report);
+      renderRevenueChart(report);
+      renderDayChart(report);
       $('afh-foot-meta').textContent =
+        report.kpis.totalAttendanceDays + ' attendance days · ' +
         report.kpis.totalRegistrations + ' registrations · ' +
-        report.weeks.length + ' weeks · ' +
-        report.products.length + ' programs';
+        report.weeks.length + ' weeks';
     }
 
     function renderAsOf(date) {
@@ -244,31 +316,53 @@
     }
 
     function renderKPIs(report) {
+      const k = report.kpis;
       const kpis = [
-        { label: 'Total Registrations', value: report.kpis.totalRegistrations },
-        { label: 'Unique Participants', value: report.kpis.uniqueParticipants },
-        { label: 'Unique Families', value: report.kpis.uniqueFamilies },
-        { label: 'Weeks of Camp', value: report.kpis.weeksOfCamp }
+        {
+          label: 'Attendance Days',
+          value: k.totalAttendanceDays.toLocaleString(),
+          sub: 'Total kid-days on site',
+          icon: iconCheck()
+        },
+        {
+          label: 'Registrations',
+          value: k.totalRegistrations.toLocaleString(),
+          sub: 'Billable bookings',
+          icon: iconClipboard()
+        },
+        {
+          label: 'Unique Kids',
+          value: k.uniqueParticipants.toLocaleString(),
+          sub: k.uniqueFamilies + ' families',
+          icon: iconUsers()
+        },
+        {
+          label: 'Est. Revenue',
+          value: '$' + k.totalRevenue.toLocaleString(),
+          sub: 'At current pricing',
+          icon: iconDollar()
+        }
       ];
       $('afh-kpis').innerHTML = kpis.map(k =>
         '<div class="afh-kpi">' +
+          '<div class="afh-kpi-icon">' + k.icon + '</div>' +
           '<div class="afh-kpi-label">' + esc(k.label) + '</div>' +
           '<div class="afh-kpi-value">' + k.value + '</div>' +
+          '<div class="afh-kpi-sub">' + esc(k.sub) + '</div>' +
         '</div>'
       ).join('');
     }
 
     function renderMainPivot(report) {
-      const { products, days, weeks, main } = report;
+      const { products, days, weeks, attendance: main } = report;
 
       const weekDayTotals = {}, weekTotal = {};
-      const grandDayProduct = {}, grandDayTotal = {}, grandProductTotal = {};
+      const grandDayProduct = {}, grandDayTotal = {};
       days.forEach(d => {
         grandDayTotal[d] = 0;
         grandDayProduct[d] = {};
         products.forEach(p => { grandDayProduct[d][p] = 0; });
       });
-      products.forEach(p => { grandProductTotal[p] = 0; });
       let grand = 0;
 
       weeks.forEach(w => {
@@ -281,7 +375,6 @@
             dayTot += v;
             grandDayProduct[d][p] += v;
             grandDayTotal[d] += v;
-            grandProductTotal[p] += v;
           });
           weekDayTotals[w][d] = dayTot;
           weekTotal[w] += dayTot;
@@ -355,7 +448,7 @@
 
     function renderUniqueTable(report) {
       const { products, byProduct } = report;
-      let html = '<thead><tr><th>Participant</th><th>Registrations</th></tr></thead><tbody>';
+      let html = '<thead><tr><th>Participant</th><th>Days</th></tr></thead><tbody>';
       let grand = 0;
       products.forEach(p => {
         const entries = Object.entries(byProduct[p]).sort((a, b) => a[0].localeCompare(b[0]));
@@ -397,66 +490,97 @@
       $('afh-camp-day-table').innerHTML = thead + tbody;
     }
 
-    // Downloads
+    function renderRevenueChart(report) {
+      const { weeks, revenueByWeek } = report;
+      const max = Math.max(1, ...weeks.map(w => revenueByWeek[w]));
+      let html = '<div class="afh-bar-chart">';
+      weeks.forEach(w => {
+        const v = revenueByWeek[w];
+        const pct = (v / max) * 100;
+        html +=
+          '<div class="afh-bar-row">' +
+            '<div class="afh-bar-label">' + esc(w) + '</div>' +
+            '<div class="afh-bar-track"><div class="afh-bar-fill revenue" style="width:' + pct + '%"></div></div>' +
+            '<div class="afh-bar-value">$' + v.toLocaleString() + '</div>' +
+          '</div>';
+      });
+      html += '</div>';
+      $('afh-revenue-chart').innerHTML = html;
+    }
+
+    function renderDayChart(report) {
+      const { days, byDay } = report;
+      const max = Math.max(1, ...days.map(d => byDay[d]));
+      let html = '<div class="afh-day-chart">';
+      days.forEach(d => {
+        const v = byDay[d];
+        const pct = (v / max) * 100;
+        html +=
+          '<div class="afh-day-col">' +
+            '<div class="afh-day-bar-wrap">' +
+              '<div class="afh-day-bar" style="height:' + pct + '%">' +
+                '<div class="afh-day-bar-value">' + v + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="afh-day-name">' + esc(d) + '</div>' +
+          '</div>';
+      });
+      html += '</div>';
+      $('afh-day-chart').innerHTML = html;
+    }
+
+    // === Downloads ===
     $('afh-download-png').addEventListener('click', downloadPNG);
     $('afh-download-pdf').addEventListener('click', downloadPDF);
     $('afh-download-xlsx').addEventListener('click', downloadXLSX);
 
     function downloadPNG() {
       const surface = $('afh-report-surface');
-      html2canvas(surface, {
-        backgroundColor: '#ffffff',
-        scale: 2,
-        useCORS: true,
-        logging: false
-      }).then(canvas => {
-        canvas.toBlob(blob => saveBlob(blob, fileName('png')), 'image/png');
-      }).catch(err => showError('PNG export failed: ' + err.message));
+      html2canvas(surface, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false })
+        .then(canvas => canvas.toBlob(blob => saveBlob(blob, fileName('png')), 'image/png'))
+        .catch(err => showError('PNG export failed: ' + err.message));
     }
 
     function downloadPDF() {
       const surface = $('afh-report-surface');
-      html2canvas(surface, {
-        backgroundColor: '#ffffff',
-        scale: 2,
-        useCORS: true,
-        logging: false
-      }).then(canvas => {
-        const imgData = canvas.toDataURL('image/png');
-        const { jsPDF } = window.jspdf;
-        const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
-        const pageW = pdf.internal.pageSize.getWidth();
-        const pageH = pdf.internal.pageSize.getHeight();
-        const imgW = pageW - 40;
-        const imgH = (canvas.height / canvas.width) * imgW;
-        if (imgH <= pageH - 40) {
-          pdf.addImage(imgData, 'PNG', 20, 20, imgW, imgH);
-        } else {
-          const totalPages = Math.ceil(imgH / (pageH - 40));
-          const sliceH = canvas.width * ((pageH - 40) / imgW);
-          for (let i = 0; i < totalPages; i++) {
-            const sliceCanvas = document.createElement('canvas');
-            sliceCanvas.width = canvas.width;
-            sliceCanvas.height = Math.min(sliceH, canvas.height - i * sliceH);
-            const ctx = sliceCanvas.getContext('2d');
-            ctx.drawImage(canvas, 0, i * sliceH, canvas.width, sliceCanvas.height,
-              0, 0, canvas.width, sliceCanvas.height);
-            if (i > 0) pdf.addPage();
-            const sliceImgH = (sliceCanvas.height / sliceCanvas.width) * imgW;
-            pdf.addImage(sliceCanvas.toDataURL('image/png'), 'PNG', 20, 20, imgW, sliceImgH);
+      html2canvas(surface, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false })
+        .then(canvas => {
+          const imgData = canvas.toDataURL('image/png');
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+          const pageW = pdf.internal.pageSize.getWidth();
+          const pageH = pdf.internal.pageSize.getHeight();
+          const imgW = pageW - 40;
+          const imgH = (canvas.height / canvas.width) * imgW;
+          if (imgH <= pageH - 40) {
+            pdf.addImage(imgData, 'PNG', 20, 20, imgW, imgH);
+          } else {
+            const totalPages = Math.ceil(imgH / (pageH - 40));
+            const sliceH = canvas.width * ((pageH - 40) / imgW);
+            for (let i = 0; i < totalPages; i++) {
+              const sc = document.createElement('canvas');
+              sc.width = canvas.width;
+              sc.height = Math.min(sliceH, canvas.height - i * sliceH);
+              const ctx = sc.getContext('2d');
+              ctx.drawImage(canvas, 0, i * sliceH, canvas.width, sc.height, 0, 0, canvas.width, sc.height);
+              if (i > 0) pdf.addPage();
+              const sih = (sc.height / sc.width) * imgW;
+              pdf.addImage(sc.toDataURL('image/png'), 'PNG', 20, 20, imgW, sih);
+            }
           }
-        }
-        pdf.save(fileName('pdf'));
-      }).catch(err => showError('PDF export failed: ' + err.message));
+          pdf.save(fileName('pdf'));
+        })
+        .catch(err => showError('PDF export failed: ' + err.message));
     }
 
     function downloadXLSX() {
       if (!currentReport) return;
-      const { products, days, weeks, main, byProduct, campDay } = currentReport;
+      const { products, days, weeks, attendance, byProduct, campDay, revenueByWeek, byDay } = currentReport;
 
+      // Sheet 1: Weekly Attendance
       const mainHeader = ['Week'];
       days.forEach(d => products.forEach(p => {
-        const total = weeks.reduce((s, w) => s + (main[w][d][p] || 0), 0);
+        const total = weeks.reduce((s, w) => s + (attendance[w][d][p] || 0), 0);
         if (total > 0) mainHeader.push(d + ' - ' + shortProduct(p));
       }));
       days.forEach(d => mainHeader.push(d + ' Total'));
@@ -470,9 +594,9 @@
         days.forEach(d => {
           dayTotals[d] = 0;
           products.forEach(p => {
-            const total = weeks.reduce((s, ww) => s + (main[ww][d][p] || 0), 0);
+            const total = weeks.reduce((s, ww) => s + (attendance[ww][d][p] || 0), 0);
             if (total > 0) {
-              const v = main[w][d][p] || 0;
+              const v = attendance[w][d][p] || 0;
               row.push(v);
               dayTotals[d] += v;
             }
@@ -483,7 +607,7 @@
         mainRows.push(row);
       });
 
-      const uniqueRows = [['Category', 'Participant', 'Registrations']];
+      const uniqueRows = [['Category', 'Participant', 'Days']];
       products.forEach(p => {
         const entries = Object.entries(byProduct[p]).sort((a, b) => a[0].localeCompare(b[0]));
         const total = entries.reduce((s, kv) => s + kv[1], 0);
@@ -501,14 +625,22 @@
         cdRows.push(row);
       });
 
+      const revRows = [['Week', 'Revenue']];
+      weeks.forEach(w => revRows.push([w, revenueByWeek[w]]));
+
+      const dayRows = [['Day', 'Attendance Days']];
+      days.forEach(d => dayRows.push([d, byDay[d]]));
+
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mainRows), 'Weekly Pivot');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mainRows), 'Weekly Attendance');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(uniqueRows), 'Unique Participants');
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cdRows), 'Camp by Day');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(revRows), 'Revenue by Week');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dayRows), 'Day Popularity');
       XLSX.writeFile(wb, fileName('xlsx'));
     }
 
-    // Helpers
+    // === Helpers ===
     function uniq(arr) { return Array.from(new Set(arr)); }
     function esc(s) {
       return String(s == null ? '' : s)
@@ -524,24 +656,17 @@
       return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
     }
     function deriveWeekLabel(date) {
-      // Find the Monday that starts this date's week
-      const dow = date.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+      const dow = date.getDay();
       const daysFromMon = (dow === 0) ? 6 : dow - 1;
       const monday = new Date(date);
       monday.setDate(date.getDate() - daysFromMon);
       monday.setHours(0, 0, 0, 0);
       const friday = new Date(monday);
       friday.setDate(monday.getDate() + 4);
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      const m1 = monthNames[monday.getMonth()];
-      const d1 = monday.getDate();
-      const m2 = monthNames[friday.getMonth()];
-      const d2 = friday.getDate();
-      // Match original labeling style: "Week Jun 22-26" or "Week Jun 29-Jul 3"
-      if (m1 === m2) {
-        return 'Week ' + m1 + ' ' + d1 + '-' + d2;
-      }
+      const mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const m1 = mn[monday.getMonth()], d1 = monday.getDate();
+      const m2 = mn[friday.getMonth()], d2 = friday.getDate();
+      if (m1 === m2) return 'Week ' + m1 + ' ' + d1 + '-' + d2;
       return 'Week ' + m1 + ' ' + d1 + '-' + m2 + ' ' + d2;
     }
     function shortProduct(p) {
@@ -564,15 +689,26 @@
       a.download = name;
       document.body.appendChild(a);
       a.click();
-      setTimeout(() => {
-        URL.revokeObjectURL(a.href);
-        a.remove();
-      }, 100);
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
     }
     function showError(msg) {
       statusEl.className = 'afh-status error';
       statusEl.textContent = msg;
     }
     function hideStatus() { statusEl.className = 'afh-status'; statusEl.textContent = ''; }
+
+    // === Icons (inline SVG) ===
+    function iconCheck() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>';
+    }
+    function iconClipboard() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><path d="M9 14l2 2 4-4"></path></svg>';
+    }
+    function iconUsers() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>';
+    }
+    function iconDollar() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>';
+    }
   }
 })();
