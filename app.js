@@ -16,9 +16,10 @@
 
   // === Configuration ===
   const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  // Only these are strictly required. Start Day of Week and Week of
+  // are derived from Event Start Date if they aren't present in the file.
   const REQUIRED_COLUMNS = [
-    'Start Day of Week', 'Week of', 'Event Start Date',
-    'Participant Name', 'Product Name'
+    'Event Start Date', 'Participant Name', 'Product Name'
   ];
 
   // === DOM references ===
@@ -129,9 +130,22 @@
         }
 
         const clean = rows.filter(r =>
-          r['Participant Name'] && r['Product Name'] && r['Start Day of Week'] && r['Week of']
+          r['Participant Name'] && r['Product Name'] && r['Event Start Date']
         );
         if (clean.length === 0) throw new Error('No valid registration rows found.');
+
+        // Derive "Start Day of Week" and "Week of" from Event Start Date
+        // if those columns are missing from the Sigma export. This keeps
+        // the tool working across export format changes.
+        clean.forEach(r => {
+          const d = parseDate(r['Event Start Date']);
+          if (!r['Start Day of Week'] && d) {
+            r['Start Day of Week'] = deriveDayOfWeek(d);
+          }
+          if (!r['Week of'] && d) {
+            r['Week of'] = deriveWeekLabel(d);
+          }
+        });
 
         const report = buildReport(clean);
         currentReport = report;
@@ -505,6 +519,30 @@
       if (v instanceof Date) return v;
       const d = new Date(v);
       return isNaN(d.getTime()) ? null : d;
+    }
+    function deriveDayOfWeek(date) {
+      return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
+    }
+    function deriveWeekLabel(date) {
+      // Find the Monday that starts this date's week
+      const dow = date.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+      const daysFromMon = (dow === 0) ? 6 : dow - 1;
+      const monday = new Date(date);
+      monday.setDate(date.getDate() - daysFromMon);
+      monday.setHours(0, 0, 0, 0);
+      const friday = new Date(monday);
+      friday.setDate(monday.getDate() + 4);
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const m1 = monthNames[monday.getMonth()];
+      const d1 = monday.getDate();
+      const m2 = monthNames[friday.getMonth()];
+      const d2 = friday.getDate();
+      // Match original labeling style: "Week Jun 22-26" or "Week Jun 29-Jul 3"
+      if (m1 === m2) {
+        return 'Week ' + m1 + ' ' + d1 + '-' + d2;
+      }
+      return 'Week ' + m1 + ' ' + d1 + '-' + m2 + ' ' + d2;
     }
     function shortProduct(p) {
       return p
