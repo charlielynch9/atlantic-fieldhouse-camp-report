@@ -1,0 +1,418 @@
+/* =========================================================================
+ * Atlantic Fieldhouse — Camp Registration Report Generator
+ * Stylesheet
+ * ========================================================================= */
+
+:root {
+  --af-navy: #0a2540;
+  --af-navy-light: #1a3a5c;
+  --af-blue: #2563eb;
+  --af-blue-light: #dbeafe;
+  --af-accent: #0ea5e9;
+  --ink: #0f172a;
+  --ink-muted: #475569;
+  --ink-subtle: #94a3b8;
+  --line: #e2e8f0;
+  --line-soft: #f1f5f9;
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --heat-0: #ffffff;
+  --heat-1: #eff6ff;
+  --heat-2: #dbeafe;
+  --heat-3: #bfdbfe;
+  --heat-4: #93c5fd;
+  --heat-5: #60a5fa;
+  --heat-6: #3b82f6;
+}
+
+.afh-container * { box-sizing: border-box; }
+
+.afh-container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ===== HEADER ===== */
+.afh-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 2px solid var(--af-navy);
+}
+.afh-brand { display: flex; align-items: center; gap: 14px; }
+.afh-logo {
+  width: 44px; height: 44px;
+  background: var(--af-navy);
+  color: white;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 18px;
+  border-radius: 6px;
+  letter-spacing: -0.5px;
+}
+.afh-title-group h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--af-navy);
+  letter-spacing: -0.3px;
+}
+.afh-title-group .afh-subtitle {
+  font-size: 13px;
+  color: var(--ink-muted);
+  margin-top: 2px;
+}
+
+/* ===== UPLOAD PANEL ===== */
+.afh-upload-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.afh-upload-row {
+  display: flex; gap: 14px;
+  align-items: center; flex-wrap: wrap;
+}
+.afh-upload-label {
+  font-size: 13px; font-weight: 600;
+  color: var(--af-navy); margin-right: 4px;
+}
+.afh-file-input-wrap {
+  flex: 1; min-width: 240px;
+  position: relative;
+  display: flex; align-items: center;
+}
+.afh-file-input {
+  position: absolute; opacity: 0; inset: 0;
+  cursor: pointer; width: 100%; height: 100%;
+}
+.afh-file-display {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1.5px dashed var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink-muted);
+  font-size: 13px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.afh-file-input-wrap:hover .afh-file-display {
+  border-color: var(--af-blue);
+  background: var(--af-blue-light);
+}
+.afh-file-display.has-file {
+  border-style: solid;
+  border-color: var(--af-blue);
+  background: var(--af-blue-light);
+  color: var(--af-navy);
+  font-weight: 500;
+}
+.afh-btn {
+  padding: 10px 18px;
+  border: none; border-radius: 6px;
+  font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+  font-family: inherit;
+}
+.afh-btn-primary { background: var(--af-navy); color: white; }
+.afh-btn-primary:hover:not(:disabled) { background: var(--af-navy-light); }
+.afh-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.afh-btn-secondary {
+  background: white; color: var(--af-navy);
+  border: 1px solid var(--line);
+}
+.afh-btn-secondary:hover { background: var(--bg); border-color: var(--af-navy); }
+.afh-btn:active:not(:disabled) { transform: translateY(1px); }
+
+/* ===== STATUS / ERRORS ===== */
+.afh-status {
+  padding: 14px 16px;
+  border-radius: 6px;
+  margin-top: 14px;
+  font-size: 13px;
+  display: none;
+}
+.afh-status.error {
+  background: #fef2f2; color: #991b1b;
+  border: 1px solid #fecaca; display: block;
+}
+.afh-status.info {
+  background: var(--af-blue-light); color: var(--af-navy);
+  border: 1px solid #bfdbfe; display: block;
+}
+
+/* ===== REPORT ===== */
+.afh-report { display: none; }
+.afh-report.active { display: block; }
+
+.afh-report-actions {
+  display: flex; gap: 10px;
+  margin-bottom: 20px; flex-wrap: wrap;
+}
+
+.afh-report-surface {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 36px 40px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.afh-report-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding-bottom: 20px;
+  border-bottom: 2px solid var(--af-navy);
+  margin-bottom: 28px;
+}
+.afh-report-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--af-navy);
+  letter-spacing: -0.4px;
+}
+.afh-report-meta {
+  font-size: 12px;
+  color: var(--ink-muted);
+  margin-top: 4px;
+}
+.afh-report-asof {
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-align: right;
+}
+.afh-report-asof strong {
+  color: var(--af-navy);
+  display: block;
+  font-size: 13px;
+}
+
+/* ===== KPIs ===== */
+.afh-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+.afh-kpi {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.afh-kpi-label {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--ink-muted);
+}
+.afh-kpi-value {
+  font-size: 26px; font-weight: 800;
+  color: var(--af-navy);
+  margin-top: 4px;
+  letter-spacing: -0.5px;
+}
+
+/* ===== SECTIONS ===== */
+.afh-section { margin-bottom: 36px; }
+.afh-section:last-child { margin-bottom: 0; }
+.afh-section-title {
+  font-size: 13px; font-weight: 700;
+  color: var(--af-navy);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin: 0 0 12px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ===== TABLES ===== */
+.afh-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+table.afh-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+table.afh-table th {
+  background: var(--af-navy);
+  color: white;
+  font-weight: 600;
+  text-align: center;
+  padding: 9px 10px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  border-right: 1px solid var(--af-navy-light);
+  white-space: nowrap;
+}
+table.afh-table th:last-child { border-right: none; }
+table.afh-table th.afh-th-day {
+  background: var(--af-navy-light);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+table.afh-table th.afh-th-product {
+  font-weight: 500;
+  font-size: 10.5px;
+  background: #1e3a5f;
+}
+table.afh-table th.afh-th-total { background: var(--af-blue); }
+table.afh-table td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line-soft);
+  text-align: center;
+  vertical-align: middle;
+  color: var(--ink);
+}
+table.afh-table td:last-child { border-right: none; }
+table.afh-table td.afh-td-row-label {
+  text-align: left;
+  font-weight: 600;
+  color: var(--af-navy);
+  background: var(--bg);
+  white-space: nowrap;
+}
+table.afh-table td.afh-td-day-total {
+  background: var(--af-blue-light);
+  font-weight: 600;
+  color: var(--af-navy);
+}
+table.afh-table td.afh-td-empty { color: var(--ink-subtle); }
+table.afh-table tr.afh-tr-total td {
+  border-top: 2px solid var(--af-navy);
+  background: var(--af-navy);
+  color: white;
+  font-weight: 700;
+}
+table.afh-table tr.afh-tr-total td.afh-td-row-label {
+  background: var(--af-navy); color: white;
+}
+table.afh-table tr.afh-tr-total td.afh-td-day-total,
+table.afh-table tr.afh-tr-total td.afh-td-grand {
+  background: var(--af-blue); color: white;
+}
+table.afh-table td.afh-td-grand {
+  background: var(--af-blue-light);
+  font-weight: 700;
+  color: var(--af-navy);
+}
+
+/* Heatmap cells */
+.afh-container .heat-0 { background: var(--heat-0); }
+.afh-container .heat-1 { background: var(--heat-1); }
+.afh-container .heat-2 { background: var(--heat-2); }
+.afh-container .heat-3 { background: var(--heat-3); }
+.afh-container .heat-4 { background: var(--heat-4); }
+.afh-container .heat-5 { background: var(--heat-5); color: white; font-weight: 600; }
+.afh-container .heat-6 { background: var(--heat-6); color: white; font-weight: 600; }
+
+/* Secondary tables layout */
+.afh-split {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 24px;
+}
+@media (max-width: 900px) {
+  .afh-split { grid-template-columns: 1fr; }
+  .afh-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+
+table.afh-table-simple {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+table.afh-table-simple th {
+  background: var(--af-navy);
+  color: white;
+  padding: 9px 12px;
+  font-weight: 600;
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+table.afh-table-simple th:last-child { text-align: right; }
+table.afh-table-simple td {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line-soft);
+}
+table.afh-table-simple td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+table.afh-table-simple tr.afh-group-header td {
+  background: var(--af-blue-light);
+  color: var(--af-navy);
+  font-weight: 700;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+table.afh-table-simple tr.afh-child-row td:first-child {
+  padding-left: 24px;
+  color: var(--ink);
+}
+table.afh-table-simple tr.afh-total-row td {
+  background: var(--af-navy);
+  color: white;
+  font-weight: 700;
+  border-top: 2px solid var(--af-navy);
+}
+
+/* Footer */
+.afh-report-foot {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-subtle);
+}
+
+/* Loading */
+.afh-loading {
+  display: none;
+  text-align: center;
+  padding: 40px;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+.afh-loading.active { display: block; }
+.afh-spinner {
+  width: 28px; height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--af-blue);
+  border-radius: 50%;
+  animation: afh-spin 0.8s linear infinite;
+  margin: 0 auto 12px;
+}
+@keyframes afh-spin { to { transform: rotate(360deg); } }
+
+/* Print / PDF adjustments */
+@media print {
+  body { background: white; }
+  .afh-upload-panel, .afh-report-actions, .afh-header { display: none; }
+  .afh-report-surface { box-shadow: none; border: none; padding: 0; }
+}
